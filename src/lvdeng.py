@@ -30,7 +30,8 @@ x_ral=0.0
 y_ral=0.0
 
 #标志位定义
-running = False  
+running = False
+recording=False  
 last_switch=0
 
 #识别参数L:亮度值范围 A:绿-红色彩范围 B:蓝-黄色彩范围
@@ -42,6 +43,8 @@ DEBUG=True#False
 # 初始化SD卡
 sd = pyb.SDCard()
 os.mount(sd, '/sd')
+video_path = "/sd/data/video.avi"
+video_id=0
 
 #初始化摄像头
 try: 
@@ -150,11 +153,30 @@ while True:
                     if not running:
                         running=True
                         if DEBUG: print("[状态] 切换到运行状态")
+                    if not recording:
+                        try:
+                            os.mkdir("/sd/data/video")
+                        except OSError:
+                            pass
+                        video_path = f"/sd/data/video/video_{video_id}.avi"
+                        video_id += 1
+                        video = image.Image(video_path, quality=90, fps=30)
+                        recording = True
+                        if DEBUG: print(f"[状态] 开始录像: {video_path}")
+
                 elif  last_switch==0:#不识别
                         if running:
                             running=False
                             if DEBUG:print("[状态]切换到停止状态")
+                        if recording:
+                            video.close()
+                            recording=False
+                            if DEBUG:print(f"[状态] 结束录像: {video_path}")
                 elif last_switch==2:#退出程序
+                        if recording:
+                            video.close()
+                            recording=False
+                            if DEBUG:print(f"[状态] 结束录像: {video_path}")
                         if DEBUG:print("[状态]接收到结束命令")
                         break
         except struct.error:

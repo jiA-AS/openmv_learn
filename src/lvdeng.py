@@ -1,4 +1,4 @@
-import sensor, image, time, pyb, os, math
+import sensor, time, pyb, os, math
 from pyb import UART
 import ustruct, struct
 import mjpeg
@@ -21,7 +21,6 @@ roi = None              # 当前ROI
 lost_count = 0          # 丢失计数
 MAX_LOST = 4            # 丢失多少帧后恢复全图搜索
 frame_count=0           #帧率计数
-save_count=0            #照片计数
 clock = time.clock()    # 追踪帧率  
 
 #变量定义
@@ -35,7 +34,6 @@ running = False
 recording=False  
 last_switch=0
 video = None            # 视频对象（初始化为None，避免未定义）
-video_id=0
 
 #识别参数L:亮度值范围 A:绿-红色彩范围 B:蓝-黄色彩范围
 green_threshold   = (   83, 100, -32, -18, -3, -20)
@@ -54,6 +52,33 @@ for d in ["/sd/data", "/sd/data/video", "/sd/data/picture"]:
         os.mkdir(d)
     except OSError:
         pass
+
+# ========== 找最小可用编号 ==========
+def get_min_available_id(folder, prefix, suffix):
+    try:
+        files = os.listdir(folder)
+    except OSError:
+        files = []
+    used_ids = set()
+    for name in files:
+        if name.startswith(prefix) and name.endswith(suffix):
+            try:
+                num_str = name[len(prefix):-len(suffix)]
+                used_ids.add(int(num_str))
+            except ValueError:
+                pass
+    vid = 0
+    while vid in used_ids:
+        vid += 1
+    return vid
+
+# 视频和图片编号自动递增（扫描已有文件，避免覆盖，取最小可用序号）
+video_id = get_min_available_id("/sd/data/video", "video_", ".mjpeg")
+save_count = get_min_available_id("/sd/data/picture", "frame_", ".jpg")
+
+if DEBUG:
+    print(f"[系统] 视频起始编号: {video_id}")
+    print(f"[系统] 图片起始编号: {save_count}")
 
 #初始化摄像头（OV7725 兼容版）
 MAX_RETRY = 3

@@ -1,6 +1,7 @@
-import sensor, image, time,pyb,os,math
+import sensor, image, time, pyb, os, math
 from pyb import UART
-import ustruct,struct
+import ustruct, struct
+import mjpeg
 
 #通信协议定义
 RX_HEAD=0xCC#接收
@@ -33,6 +34,8 @@ y_ral=0.0
 running = False
 recording=False  
 last_switch=0
+video = None            # 视频对象（初始化为None，避免未定义）
+video_id=0
 
 #识别参数L:亮度值范围 A:绿-红色彩范围 B:蓝-黄色彩范围
 green_threshold   = (   83, 100, -32, -18, -3, -20)
@@ -40,37 +43,55 @@ green_threshold   = (   83, 100, -32, -18, -3, -20)
 
 #调试开关
 DEBUG=True#False
+
 # 初始化SD卡
 sd = pyb.SDCard()
 os.mount(sd, '/sd')
-video_path = "/sd/data/video.avi"
-video_id=0
 
-#初始化摄像头
-try: 
-    sensor.reset()
-    sensor.set_pixformat(sensor.RGB565)
-    sensor.set_framesize(sensor.QVGA)  # 修改分辨率
-    sensor.skip_frames(time=2000)
-    IMAGE_W = sensor.width()  # 动态获取图像宽度，适应不同分辨率
-    IMAGE_H = sensor.height()
-    CENTER_X = IMAGE_W // 2
-    CENTER_Y = IMAGE_H // 2
-    sensor.set_auto_gain(False)
-    sensor.set_auto_whitebal(False)
-    sensor.set_auto_exposure(False, exposure_us=500)
-    if DEBUG:
-        print("[初始化] 摄像头初始化成功")
-        print(f"[参数] 图像分辨率: {IMAGE_W} × {IMAGE_H}")
-        print(f"[参数] 图像中心坐标: ({CENTER_X}, {CENTER_Y})")
-        print(f"[参数] x坐标范围: [-{CENTER_X}, {CENTER_X}]")
-        print(f"[参数] y坐标范围: [-{CENTER_Y}, {CENTER_Y}]")
-        print(f"[参数] 水平视场角(FOV_X): {FOV_X_DEG}°")
-        print(f"[参数] 垂直视场角(FOV_Y): {FOV_Y_DEG}°")
-        print(f"[参数] yaw角度范围: [-{FOV_X_DEG/2:.1f}°, {FOV_X_DEG/2:.1f}°]")
-        print(f"[参数] pitch角度范围: [-{FOV_Y_DEG/2:.1f}°, {FOV_Y_DEG/2:.1f}°]")
-except Exception as e:
-    print(f"[初始化]摄像头初始化失败：{e}")
+# 确保目录存在
+for d in ["/sd/data", "/sd/data/video", "/sd/data/picture"]:
+    try:
+        os.mkdir(d)
+    except OSError:
+        pass
+
+#初始化摄像头（OV7725 兼容版）
+MAX_RETRY = 3
+for retry in range(MAX_RETRY):
+    try:
+        sensor.reset()
+        sensor.set_pixformat(sensor.RGB565)
+        sensor.set_framesize(sensor.QVGA)  # 修改分辨率
+        # OV7725 建议：先开自动曝光让传感器稳定，再锁定
+        sensor.set_auto_gain(True)
+        sensor.set_auto_whitebal(True)
+        sensor.set_auto_exposure(True)
+        sensor.skip_frames(time=1500)
+        # 锁定参数
+        sensor.set_auto_gain(False)
+        sensor.set_auto_whitebal(False)
+        sensor.set_auto_exposure(False, exposure_us=5000)  # OV7725 建议 3000~8000
+        IMAGE_W = sensor.width()  # 动态获取图像宽度，适应不同分辨率
+        IMAGE_H = sensor.height()
+        CENTER_X = IMAGE_W // 2
+        CENTER_Y = IMAGE_H // 2
+        if DEBUG:
+            print("[初始化] 摄像头初始化成功")
+            print(f"[参数] 图像分辨率: {IMAGE_W} × {IMAGE_H}")
+            print(f"[参数] 图像中心坐标: ({CENTER_X}, {CENTER_Y})")
+            print(f"[参数] x坐标范围: [-{CENTER_X}, {CENTER_X}]")
+            print(f"[参数] y坐标范围: [-{CENTER_Y}, {CENTER_Y}]")
+            print(f"[参数] 水平视场角(FOV_X): {FOV_X_DEG}°")
+            print(f"[参数] 垂直视场角(FOV_Y): {FOV_Y_DEG}°")
+            print(f"[参数] yaw角度范围: [-{FOV_X_DEG/2:.1f}°, {FOV_X_DEG/2:.1f}°]")
+            print(f"[参数] pitch角度范围: [-{FOV_Y_DEG/2:.1f}°, {FOV_Y_DEG/2:.1f}°]")
+        break
+    except Exception as e:
+        print(f"[初始化] 第 {retry+1}/{MAX_RETRY} 次初始化失败: {e}")
+        time.sleep_ms(100)
+        if retry == MAX_RETRY - 1:
+            print("[初始化] 摄像头初始化最终失败，检查硬件连接")
+            raise
 
 #uart初始化
 uart=UART(3,115200,timeout_char=200)
@@ -132,7 +153,12 @@ def uart_read():#uart 接收
 #主程序入口
 #创建日志文件
 log_id = 0
-while f"fps_{log_id}.txt" in os.listdir("/sd/data"):
+try:
+    files = os.listdir("/sd/data")
+except OSError:
+    files = []
+
+while f"fps_{log_id}.txt" in files:
     log_id += 1
 f = open(f"/sd/data/fps_{log_id}.txt", "w")
 
@@ -154,33 +180,37 @@ while True:
                         running=True
                         if DEBUG: print("[状态] 切换到运行状态")
                     if not recording:
-                        try:
-                            os.mkdir("/sd/data/video")
-                        except OSError:
-                            pass
-                        video_path = f"/sd/data/video/video_{video_id}.avi"
+                        video_path = f"/sd/data/video/video_{video_id}.mjpeg"
                         video_id += 1
-                        video = image.Image(video_path, quality=90, fps=30)
-                        recording = True
-                        if DEBUG: print(f"[状态] 开始录像: {video_path}")
+                        try:
+                            video = mjpeg.Mjpeg(video_path)
+                            recording = True
+                            if DEBUG: print(f"[状态] 开始录像: {video_path}")
+                        except Exception as e:
+                            if DEBUG: print(f"[错误] 视频初始化失败: {e}")
 
                 elif  last_switch==0:#不识别
                         if running:
                             running=False
                             if DEBUG:print("[状态]切换到停止状态")
                         if recording:
-                            video.close()
+                            if video:
+                                video.close()
+                                video = None
                             recording=False
                             if DEBUG:print(f"[状态] 结束录像: {video_path}")
+
                 elif last_switch==2:#退出程序
                         if recording:
-                            video.close()
+                            if video:
+                                video.close()
+                                video = None
                             recording=False
                             if DEBUG:print(f"[状态] 结束录像: {video_path}")
                         if DEBUG:print("[状态]接收到结束命令")
                         break
-        except struct.error:
-            if DEBUG:print("[错误]失败")
+        except Exception as e:
+            if DEBUG:print(f"[错误] 帧解析失败: {e}")
             uart_send(2,0,0)
             continue
     #2.持续拍照
@@ -239,8 +269,19 @@ while True:
         #保存图片
         if frame_count%100==0 and save_count<1000:
             save_path=f"/sd/data/picture/frame_{save_count}.jpg"
+            try:
+                os.mkdir("/sd/data/picture")
+            except OSError:
+                pass
             img.save(save_path,quality=90)
             save_count+=1 
+
+        #写入视频帧（如果正在录像）
+        if recording and video:
+            try:
+                video.write(img)
+            except Exception as e:
+                if DEBUG: print(f"[错误] 写帧失败: {e}")
     else:#非运行状态
        pass
     #4.记录帧率
@@ -254,5 +295,7 @@ while True:
         os.sync()
 #清理工作
 f.close()
+if video:
+    video.close()
 os.umount('/sd')
 if DEBUG: print("[系统] 程序结束")
